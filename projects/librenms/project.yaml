@@ -1,5 +1,6 @@
 repo: https://github.com/librenms/librenms#master
-# TODO before opening the pull request: replace with the address that should receive reports. It is public.
+# TODO: Before you open the pull request, replace this address with the address that must receive the reports.
+# This address is public.
 primary_contact: CHANGE-ME@example.org
 homepage: https://www.librenms.org
 disabled: false

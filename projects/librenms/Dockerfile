@@ -1,10 +1,10 @@
-# LibreNMS image for Anthropic's OSS Scanner (https://github.com/anthropics/oss-scanner).
+# LibreNMS image for the OSS Scanner of Anthropic (https://github.com/anthropics/oss-scanner).
 #
-# The scanner builds this with the LibreNMS checkout as the build context, then runs the image as root in /src
-# with no network and no init system. Nothing is running when a container starts: `librenms-scanctl start` brings up
-# MariaDB, snmpsim and the web UI. See threat_model.md and `librenms-scanctl help`.
+# The scanner builds this image with the LibreNMS checkout as the build context. Then the scanner runs the image as
+# root in /src, with no network and no init system. When a container starts, no service runs. `librenms-scanctl start`
+# starts MariaDB, snmpsim and the web UI. Refer to threat_model.md and `librenms-scanctl help`.
 #
-# Try it locally from a LibreNMS checkout:
+# To build and run the image on your computer, use these commands in a LibreNMS checkout:
 #   docker build -f /path/to/oss-scanner/projects/librenms/Dockerfile -t librenms-scan .
 #   docker run --rm -it --network none librenms-scan bash
 #   # librenms-scanctl start && curl -sI http://127.0.0.1:8000/login
@@ -14,9 +14,10 @@ FROM debian:trixie
 ENV DEBIAN_FRONTEND=noninteractive \
     COMPOSER_ALLOW_SUPERUSER=1
 
-# The package list of doc/Installation/Install-LibreNMS.md for Debian 13, without nginx/php-fpm/snmpd (the web UI is
-# served by `php artisan serve`), plus what the test suite needs (sqlite, python venv) and php-ldap for the LDAP and
-# Active Directory auth backends.
+# This list is the package list for Debian 13 in doc/Installation/Install-LibreNMS.md, with these primary changes:
+# - nginx, php-fpm and snmpd are not in the list, because `php artisan serve` serves the web UI.
+# - composer, sqlite and the Python venv module are in the list, because the build and the test suite use them.
+# - php-ldap is in the list for the LDAP and Active Directory auth backends.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       acl ca-certificates composer curl file fping git jq less mariadb-client mariadb-server mtr-tiny nmap procps \
       php-bcmath php-cli php-curl php-gd php-gmp php-intl php-ldap php-mbstring php-mysql php-snmp php-sqlite3 \
@@ -26,27 +27,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       rrdtool snmp sqlite3 unzip whois \
     && rm -rf /var/lib/apt/lists/*
 
-# LibreNMS runs as its own user, as a real install does. snmpsim also refuses to run as root.
+# LibreNMS runs as its own user, the same as a production installation. snmpsim also does not run as root.
 RUN useradd --system --create-home --home-dir /var/lib/librenms --shell /bin/bash librenms \
     && git config --system --add safe.directory /src
 
-# scanner contract: the checkout lives inside the image, at /src
+# Scanner contract: the checkout is in the image, at /src.
 COPY --chown=librenms:librenms . /src
 WORKDIR /src
 
-# Same steps as CI (.github/actions/composer-install): development dependencies are kept, the tests need them.
+# These steps are the same as the CI steps (.github/actions/composer-install). The development dependencies stay,
+# because the tests use them.
 USER librenms
 RUN composer install --prefer-dist --no-interaction --no-progress --no-scripts --no-autoloader \
     && composer dump --strict-psr --strict-ambiguous --no-interaction --no-scripts
 
-# snmpsim, at the version and path LibreNMS/Util/Snmpsim.php expects, so the tests do not try to download it later.
+# This step installs snmpsim at the version and path that LibreNMS/Util/Snmpsim.php uses. As a result, the tests do
+# not download snmpsim later, when there is no network.
 ARG SNMPSIM_VERSION=2.0.1
 RUN python3 -m venv .python_venvs/snmpsim \
     && .python_venvs/snmpsim/bin/pip install --no-cache-dir -q \
       "https://github.com/librenms/snmpsim/releases/download/v${SNMPSIM_VERSION}/snmpsim-${SNMPSIM_VERSION}-py3-none-any.whl"
 
-# Local-only settings. The live instance uses the database `librenms`; the test suite uses its own database, as in CI
-# (.github/workflows/test.yml).
+# This configuration is for the image only. The live instance uses the database `librenms`. The test suite uses a
+# different database, the same as CI (.github/workflows/test.yml).
 COPY --chown=librenms:librenms <<'EOF' /src/.env
 APP_KEY=
 APP_URL=http://127.0.0.1:8000
@@ -69,11 +72,11 @@ RUN php artisan key:generate --force --no-interaction \
     && sqlite3 database/testing.sqlite ""
 USER root
 
-# Creates the sample users, devices and API tokens. Run by `librenms-scanctl setup` and `reset`.
+# This script creates the sample users, devices and API tokens. `librenms-scanctl setup` and `reset` run this script.
 COPY --chmod=644 <<'EOF' /usr/local/lib/librenms-scan/seed.php
 <?php
 
-// usage: php seed.php PASSWORD TOKEN_DIR
+// Usage: php seed.php PASSWORD TOKEN_DIR
 require '/src/vendor/autoload.php';
 $app = require '/src/bootstrap/app.php';
 $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
@@ -84,7 +87,7 @@ use Illuminate\Support\Facades\Artisan;
 
 [, $password, $token_dir] = $argv;
 
-// username => role. `user` is a normal user that may only see the device `linux`.
+// username => role. `user` is a normal user who can see only the device `linux`.
 foreach (['admin' => 'admin', 'reader' => 'global-read', 'user' => 'user', 'user2' => 'user'] as $username => $role) {
     if (! User::where('username', $username)->exists()) {
         Artisan::call('user:add', [
@@ -98,7 +101,7 @@ foreach (['admin' => 'admin', 'reader' => 'global-read', 'user' => 'user', 'user
     }
 }
 
-// Same fields as `lnms dev:simulate --multiple FILE`: the community selects tests/snmpsim/FILE.snmprec.
+// `lnms dev:simulate --multiple FILE` sets the same fields. The community selects tests/snmpsim/FILE.snmprec.
 foreach (['linux', 'ios', 'routeros'] as $community) {
     $device = Device::firstOrNew(['hostname' => $community]);
     $device->overwrite_ip = '127.1.6.1';
@@ -122,7 +125,7 @@ EOF
 
 COPY --chmod=755 <<'EOF' /usr/local/bin/librenms-scanctl
 #!/bin/bash
-# librenms-scanctl -- run LibreNMS inside the OSS Scanner image
+# librenms-scanctl -- run LibreNMS in the OSS Scanner image
 
 SRC=/src
 HOST="${LIBRENMS_HOST:-127.0.0.1}"
@@ -139,35 +142,36 @@ usage () {
     cat <<__EOF__
 Usage: librenms-scanctl COMMAND [ARGS]
 
-The image has no init system and no network; start what you need yourself.
+The image has no init system and no network. Start the services that you need.
 
 Commands:
-  start        Start MariaDB, snmpsim and the web UI at $SITE/
-               (LIBRENMS_HOST=0.0.0.0 listens on all interfaces)
-  stop         Stop the web UI, snmpsim and MariaDB
-  status       Report what is running
-  reset        Rebuild the live database and its sample data
-  poll         Discover and poll the sample devices against snmpsim
-  test [ARGS]  Start MariaDB and run \`lnms dev:check unit --db --snmpsim ARGS\`
-               (default ARGS: the CI selection without the per-OS tests)
+  start        Start MariaDB, snmpsim and the web UI at $SITE/.
+               With LIBRENMS_HOST=0.0.0.0, the web UI listens on all interfaces.
+  stop         Stop the web UI, snmpsim and MariaDB.
+  status       Show the services that run.
+  reset        Build the live database and its sample data again.
+  poll         Discover and poll the sample devices with snmpsim.
+  test [ARGS]  Start MariaDB. Then run \`lnms dev:check unit --db --snmpsim ARGS\`.
+               The default ARGS select the CI tests without the per-OS tests.
   phpunit [ARGS]
-               Start MariaDB and run \`vendor/bin/phpunit ARGS\` with DBTEST=1
-  db [NAME]    Start MariaDB and open a SQL shell on librenms (or NAME)
-  as CMD...    Run CMD in $SRC as the librenms user, e.g. \`librenms-scanctl as ./lnms device:poll linux\`
-  setup        (Build time only) create the databases and sample data
+               Start MariaDB. Then run \`vendor/bin/phpunit ARGS\` with DBTEST=1.
+  db [NAME]    Start MariaDB. Then open an SQL shell on librenms (or NAME).
+  as CMD...    Run CMD in $SRC as the librenms user.
+               Example: \`librenms-scanctl as ./lnms device:poll linux\`
+  setup        Create the databases and the sample data. Use this command only in the image build.
 
-Every account's password is \`$PASSWORD\`.
+The password of each account is \`$PASSWORD\`.
   admin        role admin
   reader       role global-read
   user         role user, with access to the device \`linux\` only
   user2        role user, with access to no device
-API tokens (header \`X-Auth-Token\`) are in $ETCDIR/USERNAME.token.
+The API tokens (header \`X-Auth-Token\`) are in $ETCDIR/USERNAME.token.
 
-Devices: linux, ios and routeros, answered by snmpsim on $SNMPSIM_ENDPOINT from
-$SRC/tests/snmpsim/NAME.snmprec (the SNMP community is the file name).
+Devices: linux, ios and routeros. snmpsim answers for them on $SNMPSIM_ENDPOINT.
+snmpsim uses $SRC/tests/snmpsim/NAME.snmprec. The SNMP community is the file name.
 
 Files:
-  $SRC/.env                 database and application settings
+  $SRC/.env                 database and application configuration
   $SRC/logs/librenms.log    application log
   $LOGDIR    mariadb.log, snmpsim.log, web.log
 __EOF__
@@ -190,7 +194,7 @@ db_start () {
         db_running && return 0
         sleep 0.5
     done
-    echo "librenms-scanctl: MariaDB did not start; see $LOGDIR/mariadb.log" 1>&2
+    echo "librenms-scanctl: MariaDB did not start. Refer to $LOGDIR/mariadb.log." 1>&2
     exit 1
 }
 
@@ -210,7 +214,7 @@ rundirs () {
 snmpsim_start () {
     pid_running "$RUNDIR/snmpsim.pid" && return 0
     rundirs
-    # --daemonize returns once snmpsim answers
+    # When snmpsim answers, the --daemonize command returns.
     as_librenms .python_venvs/snmpsim/bin/snmpsim-command-responder-lite --daemonize \
         --pid-file="$RUNDIR/snmpsim.pid" --data-dir=tests/snmpsim --agent-udpv4-endpoint="$SNMPSIM_ENDPOINT" \
         --log-level=error --logging-method="file:$LOGDIR/snmpsim.log"
@@ -226,12 +230,12 @@ web_start () {
         curl -s -o /dev/null "$SITE/login" && return 0
         sleep 0.5
     done
-    echo "librenms-scanctl: the web UI did not start; see $LOGDIR/web.log" 1>&2
+    echo "librenms-scanctl: The web UI did not start. Refer to $LOGDIR/web.log." 1>&2
     exit 1
 }
 
 stop_pid () {
-    # the pid is a session leader (setsid) or a daemon: signal its whole process group
+    # The pid is a session leader (setsid) or a daemon. Send the signal to its full process group.
     pid_running "$1" && kill -- "-$(ps -o pgid= -p "$(cat "$1")" | tr -d ' ')" 2>/dev/null
     rm -f "$1"
 }
@@ -263,7 +267,7 @@ GRANT ALL PRIVILEGES ON librenms.* TO 'librenms'@'%', 'librenms'@'localhost';
 GRANT ALL PRIVILEGES ON $TESTDB.* TO 'librenms'@'%', 'librenms'@'localhost';
 __EOF__
     seed
-    # the test suite expects its database to be migrated, as CI does
+    # The test suite uses a migrated database, the same as CI.
     (cd "$SRC" && DB_DATABASE="$TESTDB" runuser -u librenms -- php artisan migrate --force --no-interaction)
     db_stop
 }
@@ -279,8 +283,8 @@ shift
 case "$cmd" in
 setup)  cmd_setup;;
 start)  db_start; snmpsim_start; web_start
-        echo "LibreNMS is serving $SITE/"
-        echo "Every account's password is $PASSWORD; \`librenms-scanctl help\` lists accounts";;
+        echo "LibreNMS serves $SITE/"
+        echo "The password of each account is $PASSWORD. \`librenms-scanctl help\` shows the accounts.";;
 stop)   stop_pid "$RUNDIR/web.pid"; stop_pid "$RUNDIR/snmpsim.pid"; db_stop;;
 status) cmd_status;;
 reset)  db_start; seed;;
@@ -296,19 +300,21 @@ help|-h|--help) usage;;
 esac
 EOF
 
-# Create the databases and the sample data, then shut MariaDB down cleanly so its data directory is part of the image.
+# Create the databases and the sample data. Then stop MariaDB correctly, so that its data directory is in the image.
 RUN librenms-scanctl setup
 
-# Discover and poll the sample devices once, so the instance has ports, sensors and RRD files. Not fatal.
+# Discover and poll the sample devices one time. Then the instance has ports, sensors and RRD files. An error here
+# does not stop the build.
 RUN librenms-scanctl poll > /var/log/librenms-scan-poll.log 2>&1 \
-    || echo "WARNING: the sample devices could not be polled; see /var/log/librenms-scan-poll.log"; \
+    || echo "WARNING: The poll of the sample devices was not successful. Refer to /var/log/librenms-scan-poll.log."; \
     librenms-scanctl stop || true
 
-# Smoke tests, so the log shows whether the image works: boot the instance once, then run the CI unit test selection
-# without the per-OS tests (run those with `librenms-scanctl test --os NAME`). A failure does not abort the build.
+# Smoke tests. The build log shows if the image works. First, start the instance one time. Then run the CI unit tests
+# without the per-OS tests. To run the per-OS tests, use `librenms-scanctl test --os NAME`. An error here does not stop
+# the build.
 RUN (librenms-scanctl start && curl -fsS -o /dev/null -w 'login page: HTTP %{http_code}\n' http://127.0.0.1:8000/login) \
-    || echo "WARNING: the web UI smoke test failed"; \
+    || echo "WARNING: The smoke test of the web UI was not successful."; \
     librenms-scanctl stop || true
 RUN timeout 30m librenms-scanctl test \
-    || echo "WARNING: the unit tests reported failures or ran out of time"; \
+    || echo "WARNING: The unit tests found errors, or the time limit stopped them."; \
     librenms-scanctl stop || true
