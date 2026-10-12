@@ -45,8 +45,8 @@ The most important components:
   (`ajax_form.php`, `ajax_table.php`, `graph.php`, and others). This code is older than the Laravel code. Some of this
   code builds SQL and HTML by hand. Missing permission checks, SQL injection, and XSS are most probable here.
 - **Laravel controllers and API.** `app/Http/Controllers/`, `routes/`, and `includes/html/api_functions.inc.php`.
-- **Command execution.** LibreNMS runs `rrdtool`, `snmpget`, `snmpwalk`, `fping`, `nmap`, service checks (Nagios
-  plugins), and other programs. A value can come from a device, a user, or the database. Each value that goes into a
+- **Command execution.** LibreNMS runs `rrdtool`, `snmpget`, `snmpwalk`, `fping`, service checks (Nagios plugins),
+  and other programs. A value can come from a device, a user, or the database. Each value that goes into a
   command line, an rrdtool command stream, or a file path must be safe. The related code is in
   `LibreNMS/Data/Store/Rrd.php`, `app/Facades/Rrd.php`, `includes/html/graphs/`, `LibreNMS/Data/Source/`,
   `includes/services.inc.php`, and `check-services.php`.
@@ -75,69 +75,67 @@ The less important components:
 
 ## How to exercise it
 
-The image has no network. When the container starts, no service runs. Start the services with these commands:
+The image has no network. When the container starts, no service runs. The checkout is in `/src`, and the user
+`librenms` owns it. `lnms` does not run as root, so run each LibreNMS command as the user `librenms`.
+
+Start the database and the web UI with these commands:
 
 ```sh
-librenms-scanctl start      # MariaDB, snmpsim and the web UI on http://127.0.0.1:8000/
-librenms-scanctl help       # all commands, accounts and file locations
+service mariadb start
+runuser -u librenms -- php artisan serve --no-reload > /tmp/web.log 2>&1 &    # http://127.0.0.1:8000/
 ```
 
-The checkout is in `/src`, and the user `librenms` owns it. The web UI and all LibreNMS commands run as this user. To
-run a command as this user, use `librenms-scanctl as CMD`. An example is
-`librenms-scanctl as ./lnms device:poll 127.1.6.11`.
-
-**The password of each account is `LibreNMS-scan-1234`.**
+The instance has three accounts. **The password of each account is `LibreNMS-scan-1234`.**
 
 - `admin`: role `admin`
 - `reader`: role `global-read`
-- `user`: role `user`, with access to the device `linux` only
-- `user2`: role `user`, with access to no device
+- `user`: role `user`, with access to no device
 
-If `user` gets access to the device `ios` or `routeros`, that access goes across the primary boundary between users.
-If `user2` gets access to a device, the result is the same.
-
-An API token for each account is in `/etc/librenms-scan/USERNAME.token`:
+To get an API token for an account, use `lnms api:token-create`. Send the token in the header `X-Auth-Token`:
 
 ```sh
-curl -H "X-Auth-Token: $(cat /etc/librenms-scan/user.token)" http://127.0.0.1:8000/api/v0/devices
+runuser -u librenms -- ./lnms api:token-create user
+curl -H "X-Auth-Token: TOKEN" http://127.0.0.1:8000/api/v0/devices
 ```
 
-The instance has three devices. The host name of each device is its address, and its display name is the name of
-its recording:
+The instance has no devices. `lnms dev:simulate` starts snmpsim on `127.1.6.1:1161` and adds a device. snmpsim uses
+the recordings `tests/snmpsim/NAME.snmprec`, and the SNMP community selects the recording. To add the device `linux`
+and get its data, use these commands:
 
-- `linux`: `127.1.6.11`
-- `ios`: `127.1.6.12`
-- `routeros`: `127.1.6.13`
+```sh
+runuser -u librenms -- ./lnms dev:simulate --multiple linux > /tmp/simulate.log 2>&1 &
+runuser -u librenms -- ./lnms device:discover linux
+runuser -u librenms -- ./lnms device:poll linux
+```
 
-snmpsim answers for these devices on UDP port 1161. It uses the recordings `tests/snmpsim/NAME.snmprec`. The SNMP
-community selects the recording. The build discovered and polled each device one time.
+`dev:simulate` adds one device for each run. To add a second device, stop snmpsim, then start `dev:simulate` with
+a different name. The first device stays in the database, and one snmpsim answers for all recordings:
+
+```sh
+pkill -u librenms -f snmpsim
+runuser -u librenms -- ./lnms dev:simulate --multiple ios > /tmp/simulate.log 2>&1 &
+```
+
+To give `user` access to a device, log in to the web UI as `admin` and edit the user. If `user` then gets access to
+a different device, that access goes across the primary boundary between users.
 
 To act as a hostile device, do these steps:
 
 1. Copy a recording to `tests/snmpsim/evil.snmprec`.
 2. Edit the copy. For example, put markup or shell metacharacters in sysDescr, sysName, or ifAlias.
-3. Start `lnms dev:simulate --multiple evil` in the background. This command starts a second snmpsim on
-   `127.1.6.1:1161` and adds the device `evil`.
+3. Start `lnms dev:simulate --multiple evil`.
 4. Discover the device.
 5. Poll the device.
 
-```sh
-cp tests/snmpsim/linux.snmprec tests/snmpsim/evil.snmprec && chown librenms: tests/snmpsim/evil.snmprec
-librenms-scanctl as ./lnms dev:simulate --multiple evil > /tmp/simulate.log 2>&1 &
-librenms-scanctl as ./lnms device:discover evil
-librenms-scanctl as ./lnms device:poll evil
-```
-
-The RRD files are in `/src/rrd`. The application log is `/src/logs/librenms.log`. Other logs are in
-`/var/log/librenms-scan`. `librenms-scanctl reset` builds the database and the sample data again.
-`librenms-scanctl db` opens an SQL shell.
+The RRD files are in `/src/rrd`. The application log is `/src/logs/librenms.log`. `mariadb librenms` opens an SQL
+shell on the live database.
 
 The tests use a different database:
 
 ```sh
-librenms-scanctl test                                 # the CI selection without the per-OS tests
-librenms-scanctl test --os linux                      # discovery and polling tests for one OS
-librenms-scanctl phpunit tests/Feature/SomeTest.php   # one file, with database tests enabled
+runuser -u librenms -- ./lnms dev:check unit --db --snmpsim                 # tests for the changed files
+runuser -u librenms -- ./lnms dev:check unit --db --snmpsim --os linux      # discovery and polling tests for one OS
+runuser -u librenms -- env DBTEST=1 vendor/bin/phpunit tests/Unit/SqliteTest.php
 ```
 
 The developer documentation is in `doc/Developing/`. The API documentation is in `doc/API/`.
@@ -177,8 +175,7 @@ execution by an administrator through a documented feature is not a finding. Ref
   that an administrator does not control, report it. Examples are XSS against a different administrator, and CSRF
   that makes an administrator do the action. Do not report other administrator-only problems.
 - The configuration that the server operator sets, and command-line tools with arguments that the operator selects.
-- The configuration of this image: `php artisan serve`, the MariaDB configuration, the sample passwords and tokens,
-  and `/usr/local/bin/librenms-scanctl`.
+- The configuration of this image: `php artisan serve`, the MariaDB configuration, and the sample passwords.
 - Volumetric denial of service, brute force, and missing rate limits.
 - Self-XSS, and attacks that damage only the session of the attacker.
 - `tests/`, `doc/`, `mibs/`, `vendor/`, and other third-party code.
@@ -186,7 +183,7 @@ execution by an administrator through a documented feature is not a finding. Ref
 ## Reports and patches
 
 - Give the principal, the boundary, and the call chain from the entry point to the sink.
-- If possible, include a reproducer for the sample instance. A reproducer can be HTTP requests, or an edited snmprec
+- If possible, include a reproducer for the instance in this image. A reproducer can be HTTP requests, or an edited snmprec
   recording with the poll command.
 - Keep each patch small, and use the style of the adjacent code.
 - In new code, use Laravel (Eloquent, policies, Blade escaping, request validation). Do not add new uses of the legacy
