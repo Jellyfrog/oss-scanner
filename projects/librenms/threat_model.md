@@ -183,8 +183,8 @@ execution by an administrator through a documented feature is not a finding. Ref
 ## Reports and patches
 
 - Give the principal, the boundary, and the call chain from the entry point to the sink.
-- If possible, include a reproducer for the instance in this image. A reproducer can be HTTP requests, or an edited snmprec
-  recording with the poll command.
+- If possible, include a reproducer for the instance in this image. A reproducer can be HTTP requests, or an
+  edited snmprec recording with the poll command.
 - Keep each patch small, and use the style of the adjacent code.
 - In new code, use Laravel (Eloquent, policies, Blade escaping, request validation). Do not add new uses of the legacy
   `db*` helpers.
