@@ -84,7 +84,7 @@ librenms-scanctl help       # all commands, accounts and file locations
 
 The checkout is in `/src`, and the user `librenms` owns it. The web UI and all LibreNMS commands run as this user. To
 run a command as this user, use `librenms-scanctl as CMD`. An example is
-`librenms-scanctl as ./lnms device:poll linux`.
+`librenms-scanctl as ./lnms device:poll 127.1.6.11`.
 
 **The password of each account is `LibreNMS-scan-1234`.**
 
@@ -102,20 +102,30 @@ An API token for each account is in `/etc/librenms-scan/USERNAME.token`:
 curl -H "X-Auth-Token: $(cat /etc/librenms-scan/user.token)" http://127.0.0.1:8000/api/v0/devices
 ```
 
-snmpsim answers for the three devices `linux`, `ios`, and `routeros` on `127.1.6.1:1161`. It uses the recordings
-`tests/snmpsim/NAME.snmprec`. The SNMP community selects the recording.
+The instance has three devices. The host name of each device is its address, and its display name is the name of
+its recording:
+
+- `linux`: `127.1.6.11`
+- `ios`: `127.1.6.12`
+- `routeros`: `127.1.6.13`
+
+snmpsim answers for these devices on UDP port 1161. It uses the recordings `tests/snmpsim/NAME.snmprec`. The SNMP
+community selects the recording. The build discovered and polled each device one time.
 
 To act as a hostile device, do these steps:
 
-1. Copy a recording and edit the copy. For example, put markup or shell metacharacters in sysDescr, sysName, or ifAlias.
-2. Add a device that uses the name of the new recording as its community.
-3. Discover the device.
-4. Poll the device.
+1. Copy a recording to `tests/snmpsim/evil.snmprec`.
+2. Edit the copy. For example, put markup or shell metacharacters in sysDescr, sysName, or ifAlias.
+3. Start `lnms dev:simulate --multiple evil` in the background. This command starts a second snmpsim on
+   `127.1.6.1:1161` and adds the device `evil`.
+4. Discover the device.
+5. Poll the device.
 
 ```sh
-librenms-scanctl as ./lnms dev:simulate --help        # how the test suite adds simulated devices
-librenms-scanctl as ./lnms device:discover linux
-librenms-scanctl as ./lnms device:poll linux
+cp tests/snmpsim/linux.snmprec tests/snmpsim/evil.snmprec && chown librenms: tests/snmpsim/evil.snmprec
+librenms-scanctl as ./lnms dev:simulate --multiple evil > /tmp/simulate.log 2>&1 &
+librenms-scanctl as ./lnms device:discover evil
+librenms-scanctl as ./lnms device:poll evil
 ```
 
 The RRD files are in `/src/rrd`. The application log is `/src/logs/librenms.log`. Other logs are in

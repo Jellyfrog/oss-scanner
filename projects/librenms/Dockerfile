@@ -50,10 +50,10 @@ RUN python3 -m venv .python_venvs/snmpsim \
 
 # This configuration is for the image only. The live instance uses the database `librenms`. The test suite uses a
 # different database, the same as CI (.github/workflows/test.yml).
+# APP_ENV is not in this file. Without APP_ENV, the live instance runs as `production`, and phpunit can set `testing`.
 COPY --chown=librenms:librenms <<'EOF' /src/.env
 APP_KEY=
 APP_URL=http://127.0.0.1:8000
-APP_ENV=production
 APP_DEBUG=false
 DB_HOST=127.0.0.1
 DB_PORT=3306
@@ -72,57 +72,6 @@ RUN php artisan key:generate --force --no-interaction \
     && sqlite3 database/testing.sqlite ""
 USER root
 
-# This script creates the sample users, devices and API tokens. `librenms-scanctl setup` and `reset` run this script.
-COPY --chmod=644 <<'EOF' /usr/local/lib/librenms-scan/seed.php
-<?php
-
-// Usage: php seed.php PASSWORD TOKEN_DIR
-require '/src/vendor/autoload.php';
-$app = require '/src/bootstrap/app.php';
-$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
-
-use App\Models\Device;
-use App\Models\User;
-use Illuminate\Support\Facades\Artisan;
-
-[, $password, $token_dir] = $argv;
-
-// username => role. `user` is a normal user who can see only the device `linux`.
-foreach (['admin' => 'admin', 'reader' => 'global-read', 'user' => 'user', 'user2' => 'user'] as $username => $role) {
-    if (! User::where('username', $username)->exists()) {
-        Artisan::call('user:add', [
-            'username' => $username,
-            '--password' => $password,
-            '--role' => [$role],
-            '--email' => "$username@example.org",
-            '--full-name' => "Sample $role",
-        ]);
-        echo Artisan::output();
-    }
-}
-
-// `lnms dev:simulate --multiple FILE` sets the same fields. The community selects tests/snmpsim/FILE.snmprec.
-foreach (['linux', 'ios', 'routeros'] as $community) {
-    $device = Device::firstOrNew(['hostname' => $community]);
-    $device->overwrite_ip = '127.1.6.1';
-    $device->port = 1161;
-    $device->snmpver = 'v2c';
-    $device->transport = 'udp';
-    $device->community = $community;
-    $device->status_reason = '';
-    $device->save();
-}
-
-$user = User::where('username', 'user')->firstOrFail();
-$user->devicesOwned()->syncWithoutDetaching([Device::where('hostname', 'linux')->firstOrFail()->device_id]);
-
-foreach (['admin', 'reader', 'user', 'user2'] as $username) {
-    $account = User::where('username', $username)->firstOrFail();
-    $account->tokens()->delete();
-    file_put_contents("$token_dir/$username.token", $account->createToken('oss-scanner')->plainTextToken . "\n");
-}
-EOF
-
 COPY --chmod=755 <<'EOF' /usr/local/bin/librenms-scanctl
 #!/bin/bash
 # librenms-scanctl -- run LibreNMS in the OSS Scanner image
@@ -132,7 +81,9 @@ HOST="${LIBRENMS_HOST:-127.0.0.1}"
 PORT="${LIBRENMS_PORT:-8000}"
 SITE="http://127.0.0.1:$PORT"
 PASSWORD=LibreNMS-scan-1234
-SNMPSIM_ENDPOINT=127.1.6.1:1161
+SNMPSIM_PORT=1161
+# NAME:ADDRESS. NAME is the SNMP community, and it selects the recording tests/snmpsim/NAME.snmprec.
+DEVICES="linux:127.1.6.11 ios:127.1.6.12 routeros:127.1.6.13"
 TESTDB=librenms_phpunit_78hunjuybybh
 ETCDIR=/etc/librenms-scan
 LOGDIR=/var/log/librenms-scan
@@ -157,7 +108,7 @@ Commands:
                Start MariaDB. Then run \`vendor/bin/phpunit ARGS\` with DBTEST=1.
   db [NAME]    Start MariaDB. Then open an SQL shell on librenms (or NAME).
   as CMD...    Run CMD in $SRC as the librenms user.
-               Example: \`librenms-scanctl as ./lnms device:poll linux\`
+               Example: \`librenms-scanctl as ./lnms device:poll 127.1.6.11\`
   setup        Create the databases and the sample data. Use this command only in the image build.
 
 The password of each account is \`$PASSWORD\`.
@@ -167,8 +118,12 @@ The password of each account is \`$PASSWORD\`.
   user2        role user, with access to no device
 The API tokens (header \`X-Auth-Token\`) are in $ETCDIR/USERNAME.token.
 
-Devices: linux, ios and routeros. snmpsim answers for them on $SNMPSIM_ENDPOINT.
-snmpsim uses $SRC/tests/snmpsim/NAME.snmprec. The SNMP community is the file name.
+Devices (the host name is the address, the display name is NAME):
+  linux        127.1.6.11
+  ios          127.1.6.12
+  routeros     127.1.6.13
+snmpsim answers for them on UDP port $SNMPSIM_PORT. snmpsim uses $SRC/tests/snmpsim/NAME.snmprec.
+The SNMP community is NAME. \`lnms dev:simulate\` uses 127.1.6.1:1161, which stays free.
 
 Files:
   $SRC/.env                 database and application configuration
@@ -214,16 +169,22 @@ rundirs () {
 snmpsim_start () {
     pid_running "$RUNDIR/snmpsim.pid" && return 0
     rundirs
+    endpoints=()
+    for device in $DEVICES; do
+        endpoints+=(--agent-udpv4-endpoint="${device#*:}:$SNMPSIM_PORT")
+    done
     # When snmpsim answers, the --daemonize command returns.
     as_librenms .python_venvs/snmpsim/bin/snmpsim-command-responder-lite --daemonize \
-        --pid-file="$RUNDIR/snmpsim.pid" --data-dir=tests/snmpsim --agent-udpv4-endpoint="$SNMPSIM_ENDPOINT" \
+        --pid-file="$RUNDIR/snmpsim.pid" --data-dir=tests/snmpsim "${endpoints[@]}" \
         --log-level=error --logging-method="file:$LOGDIR/snmpsim.log"
 }
 
 web_start () {
     pid_running "$RUNDIR/web.pid" && return 0
     rundirs
-    (cd "$SRC" && PHP_CLI_SERVER_WORKERS=4 setsid runuser -u librenms -- \
+    # setsid gives the web UI its own process group. Then `stop` can stop the group and no other process.
+    (cd "$SRC" || exit 1
+     PHP_CLI_SERVER_WORKERS=4 setsid runuser -u librenms -- \
         php artisan serve --host="$HOST" --port="$PORT" >>"$LOGDIR/web.log" 2>&1 </dev/null &
      echo $! > "$RUNDIR/web.pid")
     for i in $(seq 1 60); do
@@ -235,24 +196,53 @@ web_start () {
 }
 
 stop_pid () {
-    # The pid is a session leader (setsid) or a daemon. Send the signal to its full process group.
-    pid_running "$1" && kill -- "-$(ps -o pgid= -p "$(cat "$1")" | tr -d ' ')" 2>/dev/null
+    pid_running "$1" && kill "$(cat "$1")"
     rm -f "$1"
 }
 
-seed () {
-    mariadb -e "DROP DATABASE IF EXISTS librenms; CREATE DATABASE librenms CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" \
-        && as_librenms php artisan migrate --force --seed --no-interaction \
-        && mkdir -p "$ETCDIR" && chown librenms:librenms "$ETCDIR" \
-        && as_librenms php /usr/local/lib/librenms-scan/seed.php "$PASSWORD" "$ETCDIR"
+web_stop () {
+    # The pid is the leader of the process group of the web UI. Send the signal to the full group.
+    pid_running "$RUNDIR/web.pid" && kill -- "-$(cat "$RUNDIR/web.pid")"
+    rm -f "$RUNDIR/web.pid"
 }
+
+# Create the live database, the sample users, the sample devices and the API tokens.
+seed () (
+    set -e
+    mariadb -e "DROP DATABASE IF EXISTS librenms"
+    mariadb -e "CREATE DATABASE librenms CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+    as_librenms php artisan migrate --force --seed --no-interaction
+
+    for account in admin:admin reader:global-read user:user user2:user; do
+        as_librenms ./lnms user:add "${account%%:*}" --password="$PASSWORD" --role="${account#*:}" \
+            --email="${account%%:*}@example.org" --full-name="Sample ${account#*:}" --no-interaction
+    done
+
+    # Most recordings have the same sysName (`<private>`).
+    as_librenms ./lnms config:set allow_duplicate_sysName true --no-interaction
+    snmpsim_start
+    for device in $DEVICES; do
+        as_librenms ./lnms device:add "${device#*:}" --v2c --community="${device%%:*}" --port="$SNMPSIM_PORT" \
+            --display-name="${device%%:*}" --no-interaction
+    done
+
+    # `user` is a normal user who can see only the device `linux`. No lnms command gives this access.
+    mariadb librenms -e "INSERT INTO devices_perms (user_id, device_id)
+        SELECT user_id, device_id FROM users, devices WHERE username = 'user' AND community = 'linux'"
+
+    mkdir -p "$ETCDIR"
+    for account in admin reader user user2; do
+        as_librenms ./lnms api:token-create "$account" --name=oss-scanner --no-ansi \
+            | grep -oE '[0-9]+\|[A-Za-z0-9]{40,}' > "$ETCDIR/$account.token"
+    done
+)
 
 cmd_poll () {
     db_start
     snmpsim_start
-    for device in linux ios routeros; do
-        as_librenms ./lnms device:discover "$device" --no-interaction
-        as_librenms ./lnms device:poll "$device" --no-interaction
+    for device in $DEVICES; do
+        as_librenms ./lnms device:discover "${device#*:}" --no-interaction
+        as_librenms ./lnms device:poll "${device#*:}" --no-interaction
     done
 }
 
@@ -269,12 +259,13 @@ __EOF__
     seed
     # The test suite uses a migrated database, the same as CI.
     (cd "$SRC" && DB_DATABASE="$TESTDB" runuser -u librenms -- php artisan migrate --force --no-interaction)
+    stop_pid "$RUNDIR/snmpsim.pid"
     db_stop
 }
 
 cmd_status () {
     if db_running; then echo "MariaDB: running"; else echo "MariaDB: stopped"; fi
-    if pid_running "$RUNDIR/snmpsim.pid"; then echo "snmpsim: $SNMPSIM_ENDPOINT"; else echo "snmpsim: stopped"; fi
+    if pid_running "$RUNDIR/snmpsim.pid"; then echo "snmpsim: $DEVICES"; else echo "snmpsim: stopped"; fi
     if pid_running "$RUNDIR/web.pid"; then echo "web UI: $SITE/"; else echo "web UI: stopped"; fi
 }
 
@@ -285,7 +276,7 @@ setup)  cmd_setup;;
 start)  db_start; snmpsim_start; web_start
         echo "LibreNMS serves $SITE/"
         echo "The password of each account is $PASSWORD. \`librenms-scanctl help\` shows the accounts.";;
-stop)   stop_pid "$RUNDIR/web.pid"; stop_pid "$RUNDIR/snmpsim.pid"; db_stop;;
+stop)   web_stop; stop_pid "$RUNDIR/snmpsim.pid"; db_stop;;
 status) cmd_status;;
 reset)  db_start; seed;;
 poll)   cmd_poll;;
@@ -315,6 +306,6 @@ RUN librenms-scanctl poll > /var/log/librenms-scan-poll.log 2>&1 \
 RUN (librenms-scanctl start && curl -fsS -o /dev/null -w 'login page: HTTP %{http_code}\n' http://127.0.0.1:8000/login) \
     || echo "WARNING: The smoke test of the web UI was not successful."; \
     librenms-scanctl stop || true
-RUN timeout 30m librenms-scanctl test \
+RUN timeout 15m librenms-scanctl test \
     || echo "WARNING: The unit tests found errors, or the time limit stopped them."; \
     librenms-scanctl stop || true
